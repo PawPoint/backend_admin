@@ -1,0 +1,39 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# Initialize Firebase Admin (shared credential with main backend)
+if not firebase_admin._apps:
+    cred = credentials.Certificate("firebase-credentials.json")
+    firebase_admin.initialize_app(cred)
+
+from routes.admin_routes import router as admin_router
+from routes.appointment_admin_routes import router as appt_admin_router
+from routes.message_routes import router as message_router
+from routes.services_routes import router as services_router
+from routes.payment_routes import router as payment_router
+
+app = FastAPI(title="PawPoint Admin API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(admin_router,      tags=["Admin"])
+app.include_router(appt_admin_router, tags=["AppointmentsAdmin"])
+app.include_router(message_router,    tags=["Messages"])
+app.include_router(services_router,   tags=["Services"])
+app.include_router(payment_router,    tags=["Payments"])
+
+
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "message": "PawPoint Admin Backend is running!",
+    }
