@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from models.appointment_admin_model import AppointmentStatusUpdate
 from logic.admin_logic import (
     get_all_pending_appointments,
+    get_all_rejected_appointments,
     approve_appointment,
     reject_appointment,
     complete_appointment,
@@ -15,6 +16,16 @@ async def list_pending_appointments():
     """Fetch all pending/scheduled appointments across all users."""
     try:
         appts = get_all_pending_appointments()
+        return {"appointments": appts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/admin/appointments/rejected")
+async def list_rejected_appointments():
+    """Fetch all rejected appointments across all users."""
+    try:
+        appts = get_all_rejected_appointments()
         return {"appointments": appts}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

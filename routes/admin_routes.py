@@ -4,8 +4,10 @@ from logic.admin_logic import (
     get_all_users,
     get_dashboard_stats,
     get_all_approved_appointments,
+    get_all_completed_appointments,
     get_all_staff,
     create_staff_account,
+    propose_reschedule,
 )
 
 router = APIRouter()
@@ -34,6 +36,15 @@ async def list_all_users():
 async def list_approved_appointments():
     try:
         return {"appointments": get_all_approved_appointments()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Completed Appointments ─────────────────────────────────────────────────────
+@router.get("/api/admin/appointments/completed")
+async def list_completed_appointments():
+    try:
+        return {"appointments": get_all_completed_appointments()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -70,6 +81,35 @@ async def provision_staff(body: CreateStaffRequest):
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
         return {"message": "Staff account created", "staff": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Propose Reschedule ────────────────────────────────────────────────────────
+class ProposeRescheduleRequest(BaseModel):
+    proposed_datetime: str   # ISO 8601 e.g. "2026-05-10T14:00:00"
+    assigned_doctor: str = ""
+
+
+@router.put("/api/admin/appointments/{user_id}/{appointment_id}/propose-reschedule")
+async def propose_reschedule_route(
+    user_id: str,
+    appointment_id: str,
+    body: ProposeRescheduleRequest,
+):
+    """Staff admin proposes a new date/time — sets status to reschedule_proposed."""
+    try:
+        result = propose_reschedule(
+            user_id, 
+            appointment_id, 
+            body.proposed_datetime,
+            assigned_doctor=body.assigned_doctor
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return {"message": "Reschedule proposed successfully", "appointment": result}
     except HTTPException:
         raise
     except Exception as e:
