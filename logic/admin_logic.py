@@ -1,7 +1,15 @@
 from firebase_admin import firestore, auth as firebase_auth
 from datetime import datetime
+import os
+import requests
+import base64
+from dotenv import load_dotenv
+import stripe
 
 
+load_dotenv()
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+paymongo_secret = os.getenv("PAYMONGO_SECRET_KEY")
 def get_db():
     return firestore.client()
 
@@ -41,12 +49,61 @@ def get_all_pending_appointments() -> list:
 def get_all_approved_appointments() -> list:
     """Fetch appointments from the top-level 'appointments' collection (approved/completed)."""
     db = get_db()
+    print("[get_all_approved_appointments] Fetching from top-level 'appointments' collection...")
     docs = db.collection("appointments").stream()
     results = []
     for doc in docs:
         data = doc.to_dict()
-        results.append({"id": doc.id, **data})
+        status = data.get("status")
+        print(f"[get_all_approved_appointments] Found doc {doc.id} | status: {status} | doctor: {data.get('doctor')} | dateTime: {data.get('dateTime')}")
+        
+        # Show approved, scheduled, and completed appointments on the calendar
+        if status in ("approved", "scheduled", "completed"):
+            results.append({"id": doc.id, **data})
+    
+    print(f"[get_all_approved_appointments] Returning {len(results)} appointments.")
     results.sort(key=lambda x: str(x.get("dateTime", "")), reverse=False)
+    return results
+
+
+def get_all_completed_appointments() -> list:
+    """Fetch only completed appointments from the top-level 'appointments' collection."""
+    db = get_db()
+    docs = db.collection("appointments").stream()
+    results = []
+    for doc in docs:
+        data = doc.to_dict()
+        if data.get("status") == "completed":
+            results.append({"id": doc.id, **data})
+    results.sort(key=lambda x: str(x.get("dateTime", "")), reverse=True)
+    return results
+
+
+def get_all_rejected_appointments() -> list:
+    """Scan all users and collect appointments with status 'rejected'."""
+    db = get_db()
+    users_ref = db.collection("users").stream()
+    results = []
+    for user_doc in users_ref:
+        user_data = user_doc.to_dict() or {}
+        user_id = user_doc.id
+        appts = (
+            db.collection("users")
+            .document(user_id)
+            .collection("appointments")
+            .stream()
+        )
+        for appt in appts:
+            data = appt.to_dict()
+            if data.get("status") == "rejected":
+                results.append({
+                    "id": appt.id,
+                    "user_id": user_id,
+                    "user_name": user_data.get("name", "Unknown"),
+                    "user_email": user_data.get("email", ""),
+                    **data,
+                })
+    results.sort(key=lambda x: str(x.get("rejected_at", x.get("dateTime", ""))), reverse=True)
     return results
 
 
@@ -91,7 +148,14 @@ def approve_appointment(
 def reject_appointment(
     user_id: str, appointment_id: str, doctor_note: str = ""
 ) -> dict:
-    """Reject an appointment."""
+    """
+    Vet cancels an appointment — ALWAYS issues a 100% full refund regardless
+    of status. Writes an in-app notification to the user's Firestore subcollection.
+    """
+    import requests, base64
+    from datetime import datetime as dt
+
+
     db = get_db()
     user_ref = (
         db.collection("users")
@@ -103,14 +167,132 @@ def reject_appointment(
     if not doc.exists:
         return {"error": "Appointment not found"}
 
-    user_ref.update({
+    data = doc.to_dict() or {}
+    amount_paid = float(data.get("amountPaidOnline", 0) or 0)
+    checkout_session_id = data.get("checkoutSessionId", "")
+
+    # ── Attempt full PayMongo refund ───────────────────────────────────────────
+    paymongo_refund_id = None
+    refund_status = "refund_not_needed" if amount_paid == 0 else "refund_pending"
+
+    if amount_paid > 0 and checkout_session_id:
+        try:
+            auth_bytes = f"{paymongo_secret}:".encode("ascii")
+            b64 = base64.b64encode(auth_bytes).decode("ascii")
+            headers = {
+                "accept": "application/json",
+                "Content-Type": "application/json",
+                "authorization": f"Basic {b64}",
+            }
+            session_resp = requests.get(
+                f"https://api.paymongo.com/v1/checkout_sessions/{checkout_session_id}",
+                headers=headers,
+            )
+            if session_resp.status_code == 200:
+                session_data = session_resp.json()
+                payment_intent_id = (
+                    session_data.get("data", {})
+                    .get("attributes", {})
+                    .get("payment_intent", {})
+                    .get("id")
+                )
+                if payment_intent_id:
+                    pi_resp = requests.get(
+                        f"https://api.paymongo.com/v1/payment_intents/{payment_intent_id}",
+                        headers=headers,
+                    )
+                    if pi_resp.status_code == 200:
+                        payments = (
+                            pi_resp.json()
+                            .get("data", {})
+                            .get("attributes", {})
+                            .get("payments", [])
+                        )
+                        if payments:
+                            actual_payment_id = payments[0].get("id")
+                            refund_resp = requests.post(
+                                "https://api.paymongo.com/v1/refunds",
+                                json={
+                                    "data": {
+                                        "attributes": {
+                                            "amount": int(amount_paid * 100),
+                                            "payment_id": actual_payment_id,
+                                            "reason": "others",
+                                            "notes": f"Vet cancelled appointment. {doctor_note}".strip(),
+                                        }
+                                    }
+                                },
+                                headers=headers,
+                            )
+                            if refund_resp.status_code in (200, 201):
+                                paymongo_refund_id = refund_resp.json().get("data", {}).get("id")
+                                refund_status = "refunded"
+                            else:
+                                print(f"[reject_appointment] Refund failed: {refund_resp.text}")
+                                refund_status = "refund_pending"
+        except Exception as e:
+            print(f"[reject_appointment] Refund error: {e}")
+            refund_status = "refund_pending"
+
+    # ── Update appointment in Firestore ────────────────────────────────────────
+    cancelled_at = dt.utcnow().isoformat()
+    update_payload = {
         "status": "rejected",
         "doctor_note": doctor_note,
-        "rejected_at": datetime.utcnow().isoformat(),
-    })
+        "rejected_at": cancelled_at,
+        "cancelledBy": "vet",
+        "refundStatus": refund_status,
+        "refundAmount": amount_paid,
+        "refundNote": "Full refund issued — appointment cancelled by vet.",
+    }
+    if paymongo_refund_id:
+        update_payload["paymongoRefundId"] = paymongo_refund_id
+
+    user_ref.update(update_payload)
+
+    # ── Write in-app notification to user ─────────────────────────────────────
+    try:
+        service = data.get("service", "your appointment")
+        pet = data.get("pet", "your pet")
+        appt_dt = data.get("dateTime", "")
+        notif_ref = (
+            db.collection("users")
+            .document(user_id)
+            .collection("notifications")
+            .document(f"vet_cancelled_{appointment_id}")
+        )
+        if not notif_ref.get().exists:
+            refund_line = (
+                f" A full refund of ₱{amount_paid:.0f} has been initiated."
+                if amount_paid > 0
+                else ""
+            )
+            reason_line = f" Reason: {doctor_note}" if doctor_note else ""
+            notif_ref.set({
+                "id": f"vet_cancelled_{appointment_id}",
+                "type": "appointment_cancelled",
+                "title": "Appointment Cancelled by Vet 🩺",
+                "body": (
+                    f"Your {service} appointment for {pet} on {appt_dt[:10] if appt_dt else 'the scheduled date'} "
+                    f"has been cancelled by the veterinarian.{reason_line}{refund_line}"
+                ),
+                "isRead": False,
+                "createdAt": cancelled_at,
+                "appointmentId": appointment_id,
+                "service": service,
+                "pet": pet,
+            })
+    except Exception as e:
+        print(f"[reject_appointment] Notification write error: {e}")
 
     updated = user_ref.get()
-    return {"id": appointment_id, **updated.to_dict()}
+    return {
+        "id": appointment_id,
+        "refund_status": refund_status,
+        "refund_amount": amount_paid,
+        **updated.to_dict(),
+    }
+
 
 
 def complete_appointment(user_id: str, appointment_id: str) -> dict:
@@ -375,11 +557,24 @@ def get_financial_stats() -> dict:
         paid_online = float(data.get("amountPaidOnline", 0) or 0)
         balance = float(data.get("balanceRemaining", 0) or 0)
         pay_status = data.get("paymentStatus", "")
+        status = data.get("status", "")
         service_name = data.get("service", "Other")
+
+        # Skip appointments that are still pending or scheduled
+        if status in ("pending", "scheduled"):
+            continue
 
         if total > 0:
             gross_revenue += total
-            cash_collected += paid_online + (total - balance if pay_status == "fully_paid" else 0)
+            
+            # ── Corrected Cash Collection Logic ──
+            if pay_status == "fully_paid":
+                # If fully paid, we have collected the entire total (online + clinic)
+                cash_collected += total
+            else:
+                # If partially paid or unpaid, we've only collected what was paid online
+                cash_collected += paid_online
+
             if balance > 0:
                 pending_receivables += balance
 
@@ -401,12 +596,17 @@ def get_all_transactions() -> list:
     results = []
     for doc in docs:
         data = doc.to_dict() or {}
-        # Only include records that have payment data
-        if not data.get("paymentMethod") and not data.get("totalPrice"):
+        status = data.get("status", "")
+        
+        # Only include records that have payment data AND are approved/completed
+        if (not data.get("paymentMethod") and not data.get("totalPrice")) or status in ("pending", "scheduled"):
             continue
         results.append({
             "id": doc.id,
+            "user_id": data.get("user_id", ""),
             "user_name": data.get("user_name", "Unknown"),
+            "pet": data.get("pet", ""),
+            "doctor": data.get("doctor", ""),
             "service": data.get("service", ""),
             "dateTime": str(data.get("dateTime", "")),
             "totalPrice": float(data.get("totalPrice", 0) or 0),
@@ -418,3 +618,90 @@ def get_all_transactions() -> list:
         })
     results.sort(key=lambda x: x["dateTime"], reverse=True)
     return results
+
+
+def propose_reschedule(
+    user_id: str, 
+    appointment_id: str, 
+    proposed_datetime: str,
+    assigned_doctor: str = ""
+) -> dict:
+    """
+    Staff admin proposes a new date/time for an appointment.
+
+    - Status → 'reschedule_proposed'
+    - Stores 'proposedDateTime' field
+    - Sets 'doctor' field so we know who is proposing/assigned
+    - Writes an in-app notification to the user asking them to Accept or Decline
+    """
+    from datetime import datetime, timezone
+    db = get_db()
+
+    user_ref = (
+        db.collection("users")
+        .document(user_id)
+        .collection("appointments")
+        .document(appointment_id)
+    )
+    doc = user_ref.get()
+    if not doc.exists:
+        return {"error": "Appointment not found"}
+
+    data = doc.to_dict() or {}
+    current_status = data.get("status", "")
+
+    if current_status in ("cancelled", "auto_cancelled", "completed", "reschedule_proposed"):
+        return {"error": f"Cannot propose reschedule for appointment with status '{current_status}'"}
+
+    now_utc = datetime.now(timezone.utc).isoformat()
+    update_payload = {
+        "status": "reschedule_proposed",
+        "proposedDateTime": proposed_datetime,
+        "rescheduledAt": now_utc,
+    }
+    if assigned_doctor:
+        update_payload["doctor"] = assigned_doctor
+
+    user_ref.update(update_payload)
+
+    top_ref = db.collection("appointments").document(appointment_id)
+    if top_ref.get().exists:
+        top_ref.update(update_payload)
+
+    # Write in-app notification so the user sees it
+    service = data.get("service", "your appointment")
+    pet = data.get("pet", "your pet")
+
+    try:
+        dt_str = proposed_datetime[:10]  # e.g. "2026-05-10"
+        time_str = proposed_datetime[11:16] if len(proposed_datetime) > 10 else ""
+        dt_label = f"{dt_str} at {time_str}" if time_str else dt_str
+    except Exception:
+        dt_label = proposed_datetime
+
+    notif_id = f"reschedule_proposed_{appointment_id}"
+    notif_ref = (
+        db.collection("users")
+        .document(user_id)
+        .collection("notifications")
+        .document(notif_id)
+    )
+    if not notif_ref.get().exists:
+        notif_ref.set({
+            "id": notif_id,
+            "type": "rescheduleProposed",
+            "title": "Reschedule Proposed 📅",
+            "body": (
+                f"The clinic has proposed a new time for your {service} appointment "
+                f"for {pet}: {dt_label}. "
+                f"Please open the app to Accept or Decline this new schedule."
+            ),
+            "isRead": False,
+            "createdAt": now_utc,
+            "appointmentId": appointment_id,
+            "service": service,
+            "pet": pet,
+        })
+
+    updated = user_ref.get()
+    return {"id": appointment_id, **updated.to_dict()}
