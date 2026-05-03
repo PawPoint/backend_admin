@@ -14,6 +14,7 @@ async def send_message_route(body: MessageCreate):
             receiver_id=body.receiver_id,
             content=body.content,
             sender_name=body.sender_name or "",
+            receiver_name=body.receiver_name or "",
             sender_role=body.sender_role or "staff_admin",
         )
         return {"message": "Sent", "data": result}

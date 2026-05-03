@@ -30,6 +30,7 @@ ADMINS = [
         "name": "Dr. Ji-Eun Park",
         "role": "staff_admin",
         "specialty": "Veterinarian",
+        "photoUrl": "assets/images/doctor1-removebg-preview.png",
     },
     {
         "email": "drmatteorossi@pawpoint.com",
@@ -37,6 +38,7 @@ ADMINS = [
         "name": "Dr. Matteo Rossi",
         "role": "staff_admin",
         "specialty": "Veterinarian",
+        "photoUrl": "assets/images/doctor2-removebg-preview.png",
     },
     {
         "email": "nursehanakim@pawpoint.com",
@@ -44,6 +46,7 @@ ADMINS = [
         "name": "Nurse Hana Kim",
         "role": "super_admin",
         "specialty": "Veterinary Nurse",
+        "photoUrl": "assets/images/n1-removebg-preview.png",
     },
     {
         "email": "nursesofiamuller@pawpoint.com",
@@ -51,6 +54,7 @@ ADMINS = [
         "name": "Nurse Sofia Müller",
         "role": "super_admin",
         "specialty": "Veterinary Nurse",
+        "photoUrl": "assets/images/n2-removebg-preview.png",
     },
 ]
 
@@ -89,6 +93,8 @@ def seed():
                 "name": admin["name"],
                 "role": admin["role"],
                 "specialty": admin["specialty"],
+                "photoUrl": admin.get("photoUrl", ""),
+                "isActive": False,
                 "created_at": firestore.SERVER_TIMESTAMP,
             },
             merge=True,  # Preserve any existing fields

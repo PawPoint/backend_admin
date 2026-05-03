@@ -12,4 +12,5 @@ class MessageCreate(BaseModel):
     receiver_id: str
     content: str
     sender_name: Optional[str] = ""
+    receiver_name: Optional[str] = ""
     sender_role: Optional[str] = "staff_admin"
