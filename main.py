@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import firebase_admin
 from firebase_admin import credentials, firestore
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 # Initialize Firebase Admin (shared credential with main backend)
 if not firebase_admin._apps:

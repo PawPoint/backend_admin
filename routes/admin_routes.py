@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from logic.admin_logic import (
     get_all_users,
@@ -8,7 +8,11 @@ from logic.admin_logic import (
     get_all_staff,
     create_staff_account,
     propose_reschedule,
+    mark_staff_active,
+    deactivate_staff,
+    get_user_pets,
 )
+from logic.email_logic import send_verification_email
 
 router = APIRouter()
 
@@ -27,6 +31,16 @@ async def dashboard_stats():
 async def list_all_users():
     try:
         return {"users": get_all_users()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/admin/users/{user_id}/pets")
+async def list_user_pets(user_id: str):
+    """Return all pets for a specific user."""
+    try:
+        pets = get_user_pets(user_id)
+        return {"pets": pets}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -65,10 +79,14 @@ class CreateStaffRequest(BaseModel):
     password: str
     specialty: str = "Veterinarian"
     role: str = "staff_admin"
+    phone: str = ""
+    bio: str = ""
+    photoUrl: str = ""
+    isActive: bool = False
 
 
 @router.post("/api/admin/staff")
-async def provision_staff(body: CreateStaffRequest):
+async def provision_staff(body: CreateStaffRequest, bg: BackgroundTasks):
     """Create a new Firebase Auth user and seed into the admins collection."""
     try:
         result = create_staff_account(
@@ -77,10 +95,48 @@ async def provision_staff(body: CreateStaffRequest):
             password=body.password,
             specialty=body.specialty,
             role=body.role,
+            phone=body.phone,
+            bio=body.bio,
+            photoUrl=body.photoUrl,
+            isActive=body.isActive,
         )
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
+        
+        # Send verification email in the background if link exists
+        v_link = result.get("verification_link")
+        if v_link:
+            bg.add_task(send_verification_email, body.email, body.name, v_link)
+
         return {"message": "Staff account created", "staff": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/admin/staff/{uid}/activate")
+async def activate_staff(uid: str):
+    """Mark a staff member as active."""
+    try:
+        result = mark_staff_active(uid)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return {"message": "Staff member activated", "staff": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/admin/staff/{uid}/deactivate")
+async def deactivate_staff_route(uid: str):
+    """Mark a staff member as deactivated (fire/resign)."""
+    try:
+        result = deactivate_staff(uid)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return {"message": "Staff member deactivated", "staff": result}
     except HTTPException:
         raise
     except Exception as e:

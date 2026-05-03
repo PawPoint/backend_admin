@@ -5,6 +5,7 @@ import requests
 import base64
 from dotenv import load_dotenv
 import stripe
+from logic.email_logic import send_cancellation_email, send_verification_email
 
 
 load_dotenv()
@@ -80,7 +81,7 @@ def get_all_completed_appointments() -> list:
 
 
 def get_all_rejected_appointments() -> list:
-    """Scan all users and collect appointments with status 'rejected'."""
+    """Scan all users and collect appointments with status 'rejected', 'cancelled', or 'auto_cancelled'."""
     db = get_db()
     users_ref = db.collection("users").stream()
     results = []
@@ -95,7 +96,7 @@ def get_all_rejected_appointments() -> list:
         )
         for appt in appts:
             data = appt.to_dict()
-            if data.get("status") == "rejected":
+            if data.get("status") in ("rejected", "cancelled", "auto_cancelled"):
                 results.append({
                     "id": appt.id,
                     "user_id": user_id,
@@ -103,7 +104,7 @@ def get_all_rejected_appointments() -> list:
                     "user_email": user_data.get("email", ""),
                     **data,
                 })
-    results.sort(key=lambda x: str(x.get("rejected_at", x.get("dateTime", ""))), reverse=True)
+    results.sort(key=lambda x: str(x.get("rejected_at", x.get("cancelledAt", x.get("dateTime", "")))), reverse=True)
     return results
 
 
@@ -150,19 +151,23 @@ def reject_appointment(
 ) -> dict:
     """
     Vet cancels an appointment — ALWAYS issues a 100% full refund regardless
-    of status. Writes an in-app notification to the user's Firestore subcollection.
+    of status. Writes an in-app notification to the user's Firestore subcollection
+    AND sends a refund receipt email.
     """
-    import requests, base64
-    from datetime import datetime as dt
-
-
     db = get_db()
-    user_ref = (
-        db.collection("users")
-        .document(user_id)
-        .collection("appointments")
-        .document(appointment_id)
-    )
+    
+    # Fetch user data for email and name
+    user_doc_ref = db.collection("users").document(user_id)
+    user_snapshot = user_doc_ref.get()
+    user_data = user_snapshot.to_dict() or {}
+    user_email = user_data.get("email")
+    user_name = user_data.get("name", "Valued Customer")
+
+    print(f"[reject_appointment] user_id: {user_id}")
+    print(f"[reject_appointment] user_email: {user_email}")
+    print(f"[reject_appointment] user_name: {user_name}")
+
+    user_ref = user_doc_ref.collection("appointments").document(appointment_id)
     doc = user_ref.get()
     if not doc.exists:
         return {"error": "Appointment not found"}
@@ -235,7 +240,7 @@ def reject_appointment(
             refund_status = "refund_pending"
 
     # ── Update appointment in Firestore ────────────────────────────────────────
-    cancelled_at = dt.utcnow().isoformat()
+    cancelled_at = datetime.utcnow().isoformat()
     update_payload = {
         "status": "rejected",
         "doctor_note": doctor_note,
@@ -250,7 +255,34 @@ def reject_appointment(
 
     user_ref.update(update_payload)
 
+    # ── Mirror to top-level appointments collection if present ────────────────
+    top_ref = db.collection("appointments").document(appointment_id)
+    if top_ref.get().exists:
+        top_ref.update(update_payload)
+
+    # ── Send Email Notification & Refund Receipt ──────────────────────────────
+    if user_email and refund_status in ("refunded", "refund_pending", "refund_not_needed"):
+        try:
+            service = data.get("service", "your appointment")
+            pet = data.get("pet", "your pet")
+            appt_dt = data.get("dateTime", "")
+            send_cancellation_email(
+                to_email=user_email,
+                user_name=user_name,
+                appointment_id=appointment_id,
+                service_name=service,
+                pet_name=pet,
+                appointment_date=appt_dt,
+                amount_refunded=amount_paid,
+                reason=doctor_note
+            )
+        except Exception as e:
+            print(f"[reject_appointment] Email sending failed: {e}")
+    else:
+        print(f"[reject_appointment] Skipping email: user_email={user_email}, refund_status={refund_status}")
+
     # ── Write in-app notification to user ─────────────────────────────────────
+
     try:
         service = data.get("service", "your appointment")
         pet = data.get("pet", "your pet")
@@ -398,6 +430,17 @@ def get_all_users() -> list:
     return results
 
 
+def get_user_pets(user_id: str) -> list:
+    """Fetch all pets for a specific user."""
+    db = get_db()
+    docs = db.collection("users").document(user_id).collection("pets").stream()
+    results = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        results.append({"id": doc.id, **data})
+    return results
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  STAFF / ADMINS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -420,34 +463,111 @@ def create_staff_account(
     password: str,
     specialty: str = "Veterinarian",
     role: str = "staff_admin",
+    phone: str = "",
+    bio: str = "",
+    photoUrl: str = "",
+    isActive: bool = False,
 ) -> dict:
-    """Create a Firebase Auth user and seed into the admins collection."""
+    """Create a Firebase Auth user, send verification email, and seed into the admins collection."""
     db = get_db()
 
-    # 1. Create Firebase Auth account
+    # 1. Create or Update Firebase Auth account
+    # NOTE: Firebase Auth only accepts http/https URLs for photo_url.
+    # Base64 data URIs are stored in Firestore only.
+    auth_photo_url = photoUrl if photoUrl and photoUrl.startswith("http") else None
+
     try:
         user = firebase_auth.get_user_by_email(email)
         uid = user.uid
+        is_new = False
+        # Update existing user to ensure they can log in with the new staff password
+        update_kwargs = {
+            "password": password,
+            "display_name": name,
+            "disabled": False,  # Ensure account is enabled
+        }
+        if auth_photo_url:
+            update_kwargs["photo_url"] = auth_photo_url
+        elif user.photo_url and user.photo_url.startswith("http"):
+            # Keep existing valid Auth photo URL
+            update_kwargs["photo_url"] = user.photo_url
+        firebase_auth.update_user(uid, **update_kwargs)
     except firebase_auth.UserNotFoundError:
-        user = firebase_auth.create_user(
-            email=email,
-            password=password,
-            display_name=name,
-            email_verified=True,
-        )
+        create_kwargs = {
+            "email": email,
+            "password": password,
+            "display_name": name,
+            "email_verified": False,  # Must verify first
+        }
+        if phone:
+            create_kwargs["phone_number"] = phone
+        if auth_photo_url:
+            create_kwargs["photo_url"] = auth_photo_url
+        user = firebase_auth.create_user(**create_kwargs)
         uid = user.uid
+        is_new = True
 
-    # 2. Seed admins collection
+    # 2. Generate Verification Link if new
+    verification_link = None
+    if is_new:
+        try:
+            verification_link = firebase_auth.generate_email_verification_link(email)
+        except Exception as e:
+            print(f"[create_staff_account] Failed to generate verification: {e}")
+
+    # 3. Seed admins collection
     doc_data = {
         "uid": uid,
         "email": email,
         "name": name,
         "role": role,
         "specialty": specialty,
+        "phone": phone,
+        "bio": bio,
+        "photoUrl": photoUrl,
+        "isActive": isActive,
+        "isDeactivated": False,
+        "email_verified": False if is_new else user.email_verified,
         "created_at": datetime.utcnow().isoformat(),
     }
     db.collection("admins").document(uid).set(doc_data, merge=True)
-    return {"uid": uid, **doc_data}
+    
+    return {
+        "uid": uid, 
+        "is_new": is_new, 
+        "verification_link": verification_link,
+        **doc_data
+    }
+
+
+def mark_staff_active(uid: str) -> dict:
+    """Mark a staff member as active and verified."""
+    db = get_db()
+    ref = db.collection("admins").document(uid)
+    if not ref.get().exists:
+        return {"error": "Staff member not found"}
+    
+    ref.update({
+        "isActive": True,
+        "email_verified": True,
+        "isDeactivated": False # Ensure reset if previously deactivated
+    })
+    return {"uid": uid, "isActive": True, "email_verified": True}
+
+
+def deactivate_staff(uid: str) -> dict:
+    """Deactivate a staff member (fire/resign)."""
+    db = get_db()
+    ref = db.collection("admins").document(uid)
+    if not ref.get().exists:
+        return {"error": "Staff member not found"}
+
+    ref.update({
+        "isActive": False,
+        "isDeactivated": True,
+        "deactivatedAt": datetime.utcnow().isoformat()
+    })
+    return {"uid": uid, "isActive": False, "isDeactivated": True}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -525,6 +645,11 @@ def mark_balance_paid(user_id: str, appointment_id: str) -> dict:
     if not doc.exists:
         return {"error": "Appointment not found"}
 
+    data = doc.to_dict() or {}
+    status = data.get("status", "")
+    if status in ("cancelled", "auto_cancelled", "rejected"):
+        return {"error": f"Cannot collect balance for a {status} appointment."}
+
     updates = {
         "balanceRemaining": 0.0,
         "paymentStatus": "fully_paid",
@@ -564,15 +689,38 @@ def get_financial_stats() -> dict:
         if status in ("pending", "scheduled"):
             continue
 
+        # Case 1: User-initiated cancellation (Downpayment forfeited)
+        if status in ("cancelled", "auto_cancelled"):
+            # We count only the online downpayment as revenue
+            gross_revenue += paid_online
+            cash_collected += paid_online
+            # No pending receivable for cancelled services
+            if service_name:
+                service_revenue[service_name] = service_revenue.get(service_name, 0.0) + paid_online
+            continue
+
+        # Case 2: Vet-initiated cancellation (Rejected)
+        if status == "rejected":
+            # If it's rejected, it's usually fully refunded (0 revenue)
+            refund_status = data.get("refundStatus", "")
+            if refund_status != "refunded":
+                # Only count if for some reason it wasn't refunded
+                gross_revenue += paid_online
+                cash_collected += paid_online
+                if service_name:
+                    service_revenue[service_name] = service_revenue.get(service_name, 0.0) + paid_online
+            # No pending receivable
+            continue
+
+        # Case 3: Active (Approved) or Finished (Completed)
         if total > 0:
             gross_revenue += total
             
-            # ── Corrected Cash Collection Logic ──
             if pay_status == "fully_paid":
-                # If fully paid, we have collected the entire total (online + clinic)
+                # Entire total collected
                 cash_collected += total
             else:
-                # If partially paid or unpaid, we've only collected what was paid online
+                # Only downpayment collected so far
                 cash_collected += paid_online
 
             if balance > 0:
@@ -598,7 +746,7 @@ def get_all_transactions() -> list:
         data = doc.to_dict() or {}
         status = data.get("status", "")
         
-        # Only include records that have payment data AND are approved/completed
+        # Only include records that have payment data AND are approved/completed/cancelled
         if (not data.get("paymentMethod") and not data.get("totalPrice")) or status in ("pending", "scheduled"):
             continue
         results.append({
@@ -608,6 +756,7 @@ def get_all_transactions() -> list:
             "pet": data.get("pet", ""),
             "doctor": data.get("doctor", ""),
             "service": data.get("service", ""),
+            "status": status,
             "dateTime": str(data.get("dateTime", "")),
             "totalPrice": float(data.get("totalPrice", 0) or 0),
             "amountPaidOnline": float(data.get("amountPaidOnline", 0) or 0),

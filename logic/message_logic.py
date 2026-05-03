@@ -7,10 +7,21 @@ def get_db():
     return firestore.client()
 
 
-def send_message(sender_id: str, receiver_id: str, content: str, sender_name: str = "", sender_role: str = "staff_admin") -> dict:
-    """Store a message in the admin_messages collection."""
+def send_message(
+    sender_id: str,
+    receiver_id: str,
+    content: str,
+    sender_name: str = "",
+    receiver_name: str = "",
+    sender_role: str = "staff_admin",
+) -> dict:
+    """Store a message in the admin_messages collection.
+    
+    Conversation IDs are deterministic: sorted(sender_id, receiver_id) joined by '__'.
+    This guarantees the same two users always share exactly ONE conversation document.
+    """
     db = get_db()
-    # Conversation ID is sorted pair of user IDs for easy lookup
+    # Conversation ID is sorted pair of user IDs — always unique per pair
     conv_id = "__".join(sorted([sender_id, receiver_id]))
     
     # 1. Update/Create the Parent Conversation Document for easy querying
@@ -19,6 +30,11 @@ def send_message(sender_id: str, receiver_id: str, content: str, sender_name: st
         "participants": [sender_id, receiver_id],
         "last_message": content,
         "updated_at": datetime.utcnow().isoformat(),
+        # Store names so the client can resolve peer names without a staff lookup
+        "participant_names": {
+            sender_id: sender_name,
+            receiver_id: receiver_name,
+        },
     }
     conv_ref.set(conv_metadata, merge=True)
 
@@ -35,6 +51,7 @@ def send_message(sender_id: str, receiver_id: str, content: str, sender_name: st
     }
     msg_ref.set(data)
     return {"id": msg_ref.id, **data}
+
 
 
 def get_messages(uid: str) -> list:
