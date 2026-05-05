@@ -9,8 +9,16 @@ load_dotenv()
 
 # Initialize Firebase Admin (shared credential with main backend)
 if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase-credentials.json")
-    firebase_admin.initialize_app(cred)
+    creds_path = "firebase-credentials.json"
+    if os.path.exists(creds_path):
+        try:
+            cred = credentials.Certificate(creds_path)
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase Admin initialized successfully.")
+        except Exception as e:
+            print(f"❌ Error initializing Firebase Admin: {e}")
+    else:
+        print(f"❌ Error: {creds_path} not found. Please ensure it is provided as a Secret File on Render.")
 
 from routes.admin_routes import router as admin_router
 from routes.appointment_admin_routes import router as appt_admin_router
