@@ -4,12 +4,10 @@ import os
 import requests
 import base64
 from dotenv import load_dotenv
-import stripe
 from logic.email_logic import send_cancellation_email, send_verification_email
 
 
 load_dotenv()
-stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 paymongo_secret = os.getenv("PAYMONGO_SECRET_KEY")
 def get_db():
     return firestore.client()
