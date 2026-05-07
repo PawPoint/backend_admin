@@ -5,6 +5,7 @@ from logic.admin_logic import (
     get_all_rejected_appointments,
     approve_appointment,
     reject_appointment,
+    cancel_appointment_by_admin,
     complete_appointment,
 )
 
@@ -74,5 +75,21 @@ async def complete_appointment_route(user_id: str, appointment_id: str):
     try:
         result = complete_appointment(user_id, appointment_id)
         return {"message": "Appointment completed", "appointment": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/admin/appointments/{user_id}/{appointment_id}/cancel")
+async def cancel_appointment_by_admin_route(user_id: str, appointment_id: str, body: AppointmentStatusUpdate):
+    """Admin cancels an appointment — issues a full refund to the user."""
+    try:
+        result = cancel_appointment_by_admin(
+            user_id, appointment_id, reason=body.doctor_note or ""
+        )
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+        return {"message": "Appointment cancelled by admin", "appointment": result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

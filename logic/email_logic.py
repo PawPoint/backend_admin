@@ -82,7 +82,8 @@ def send_cancellation_email(
     pet_name: str,
     appointment_date: str,
     amount_refunded: float,
-    reason: str = ""
+    reason: str = "",
+    refunded: bool = True,
 ):
     """
     Sends a cancellation and refund receipt email to the user.
