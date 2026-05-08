@@ -81,19 +81,17 @@ def send_cancellation_email(
     service_name: str,
     pet_name: str,
     appointment_date: str,
-    amount_refunded: float,
     reason: str = "",
-    refunded: bool = True,
 ):
     """
-    Sends a cancellation and refund receipt email to the user.
+    Sends a cancellation confirmation email to the user.
     """
     smtp_host = os.getenv("SMTP_HOST")
     smtp_port = int(os.getenv("SMTP_PORT", 587))
     smtp_user = os.getenv("SMTP_USER")
     smtp_pass = os.getenv("SMTP_PASS")
 
-    print(f"[email_logic] Attempting to send refund email to {to_email}")
+    print(f"[email_logic] Attempting to send cancellation email to {to_email}")
     print(f"[email_logic] SMTP Config: {smtp_host}:{smtp_port} (User: {smtp_user})")
 
     if not all([smtp_host, smtp_user, smtp_pass]) or \
@@ -102,10 +100,7 @@ def send_cancellation_email(
         print("[email_logic] ERROR: SMTP credentials not configured or still using placeholders.")
         return False
 
-    subject = f"Appointment Cancelled & Refund Receipt - {service_name}"
-    
-    # Format currency
-    formatted_amount = f"₱{amount_refunded:,.2f}"
+    subject = f"Appointment Cancellation Confirmation - {service_name}"
     
     # HTML Content
     html_content = f"""
@@ -114,11 +109,11 @@ def send_cancellation_email(
         <div style="max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
             <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #ddd;">
                 <h1 style="color: #d9534f; margin: 0;">Appointment Cancelled</h1>
-                <p style="font-size: 1.1em; color: #777;">Refund Receipt</p>
+                <p style="font-size: 1.1em; color: #777;">Cancellation Confirmation</p>
             </div>
             <div style="padding: 20px;">
-                <p>Hi <strong>{user_name}</strong> icon,</p>
-                <p>We are writing to inform you that your appointment has been cancelled by the clinic staff. A full refund has been processed for this transaction.</p>
+                <p>Hi <strong>{user_name}</strong>,</p>
+                <p>We are writing to inform you that your appointment has been cancelled by the clinic staff.</p>
                 
                 <div style="background-color: #fdf7f7; border-left: 5px solid #d9534f; padding: 15px; margin: 20px 0;">
                     <h3 style="margin-top: 0; color: #d9534f;">Cancellation Details</h3>
@@ -140,12 +135,6 @@ def send_cancellation_email(
                             <td style="padding: 5px 0; font-family: monospace;">{appointment_id}</td>
                         </tr>
                     </table>
-                </div>
-
-                <div style="background-color: #f0f8ff; border-left: 5px solid #007bff; padding: 15px; margin: 20px 0;">
-                    <h3 style="margin-top: 0; color: #007bff;">Refund Information</h3>
-                    <p style="font-size: 1.2em; margin-bottom: 5px;">Total Refunded: <strong>{formatted_amount}</strong></p>
-                    <p style="font-size: 0.9em; color: #555;">The amount has been credited back to your original payment method. Please allow 3-7 business days for the transaction to reflect in your account.</p>
                 </div>
 
                 {f'<p><strong>Reason for Cancellation:</strong> {reason}</p>' if reason else ""}

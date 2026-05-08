@@ -81,7 +81,7 @@ async def complete_appointment_route(user_id: str, appointment_id: str):
 
 @router.put("/api/admin/appointments/{user_id}/{appointment_id}/cancel")
 async def cancel_appointment_by_admin_route(user_id: str, appointment_id: str, body: AppointmentStatusUpdate):
-    """Admin cancels an appointment — issues a full refund to the user."""
+    """Admin cancels an appointment."""
     try:
         result = cancel_appointment_by_admin(
             user_id, appointment_id, reason=body.doctor_note or ""
